@@ -1,13 +1,14 @@
 # 📈 A股智能分析系统
 
 [![GitHub stars](https://img.shields.io/github/stars/ZhuLinsen/daily_stock_analysis?style=social)](https://github.com/ZhuLinsen/daily_stock_analysis/stargazers)
+[![CI](https://github.com/ZhuLinsen/daily_stock_analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/ZhuLinsen/daily_stock_analysis/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Ready-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
 
-> 🤖 基于 AI 大模型的 A 股自选股智能分析系统，每日自动分析并推送「决策仪表盘」到企业微信/钉钉/飞书
+> 🤖 基于 AI 大模型的 A/H 股自选股智能分析系统，每日自动分析并推送「决策仪表盘」到企业微信/飞书/Telegram/邮箱
 
-![运行效果演示](./sources/2026-01-10_155341_daily_analysis.gif)
+![运行效果演示](./sources/all_2026-01-13_221547.gif)
 
 ## ✨ 功能特性
 
@@ -15,14 +16,17 @@
 - **AI 决策仪表盘** - 一句话核心结论 + 精确买卖点位 + 检查清单
 - **多维度分析** - 技术面 + 筹码分布 + 舆情情报 + 实时行情
 - **大盘复盘** - 每日市场概览、板块涨跌、北向资金
-- **定时推送** - 支持企业微信机器人自动推送
+- **多渠道推送** - 支持企业微信、飞书、Telegram、邮件（自动识别）
 - **零成本部署** - GitHub Actions 免费运行，无需服务器
 - **💰 白嫖 Gemini API** - Google AI Studio 提供免费额度，个人使用完全够用
+- **🔄 多模型支持** - 支持 OpenAI 兼容 API（DeepSeek、通义千问等）作为备选
 
 ### 📊 数据来源
 - **行情数据**: AkShare（免费）、Tushare、Baostock、YFinance
-- **新闻搜索**: Tavily、SerpAPI
-- **AI 分析**: Google Gemini（gemini-3-flash-preview）—— [免费获取 API Key](https://aistudio.google.com/)
+- **新闻搜索**: Tavily、SerpAPI、Bocha
+- **AI 分析**: 
+  - 主力：Google Gemini（gemini-3-flash-preview）—— [免费获取](https://aistudio.google.com/)
+  - 备选：应大家要求，也支持了OpenAI 兼容 API（DeepSeek、通义千问、Moonshot 等）
 
 ### 🛡️ 交易理念内置
 - ❌ **严禁追高** - 乖离率 > 5% 自动标记「危险」
@@ -44,13 +48,44 @@
 
 进入你 Fork 的仓库 → `Settings` → `Secrets and variables` → `Actions` → `New repository secret`
 
+**AI 模型配置（二选一）**
+
 | Secret 名称 | 说明 | 必填 |
 |------------|------|:----:|
-| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) 获取 | ✅ |
-| `WECHAT_WEBHOOK_URL` | 企业微信机器人 Webhook | ✅ |
+| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) 获取免费 Key | ✅* |
+| `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
+| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址（如 `https://api.deepseek.com/v1`） | 可选 |
+| `OPENAI_MODEL` | 模型名称（如 `deepseek-chat`） | 可选 |
+
+> *注：`GEMINI_API_KEY` 和 `OPENAI_API_KEY` 至少配置一个
+
+**通知渠道配置（可同时配置多个，全部推送）**
+
+| Secret 名称 | 说明 | 必填 |
+|------------|------|:----:|
+| `WECHAT_WEBHOOK_URL` | 企业微信 Webhook URL | 可选 |
+| `FEISHU_WEBHOOK_URL` | 飞书 Webhook URL | 可选 |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token（@BotFather 获取） | 可选 |
+| `TELEGRAM_CHAT_ID` | Telegram Chat ID | 可选 |
+| `EMAIL_SENDER` | 发件人邮箱（如 `xxx@qq.com`） | 可选 |
+| `EMAIL_PASSWORD` | 邮箱授权码（非登录密码） | 可选 |
+| `EMAIL_RECEIVERS` | 收件人邮箱（多个用逗号分隔，留空则发给自己） | 可选 |
+| `CUSTOM_WEBHOOK_URLS` | 自定义 Webhook（支持钉钉等，多个用逗号分隔） | 可选 |
+| `CUSTOM_WEBHOOK_BEARER_TOKEN` | 自定义 Webhook 的 Bearer Token（用于需要认证的 Webhook） | 可选 |
+| `SINGLE_STOCK_NOTIFY` | 单股推送模式：设为 `true` 则每分析完一只股票立即推送 | 可选 |
+
+> *注：至少配置一个渠道，配置多个则同时推送
+>
+> 📖 更多配置（Pushover 手机推送、飞书云文档等）请参考 [完整配置指南](docs/full-guide.md)
+
+**其他配置**
+
+| Secret 名称 | 说明 | 必填 |
+|------------|------|:----:|
 | `STOCK_LIST` | 自选股代码，如 `600519,300750,002594` | ✅ |
 | `TAVILY_API_KEYS` | [Tavily](https://tavily.com/) 搜索 API（新闻搜索） | 推荐 |
-| `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/) Key | 可选 |
+| `BOCHA_API_KEYS` | [博查搜索](https://open.bocha.cn/) Web Search API（中文搜索优化，支持AI摘要，多个key用逗号分隔） | 可选 |
+| `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/) 备用搜索 | 可选 |
 | `TUSHARE_TOKEN` | [Tushare Pro](https://tushare.pro/) Token | 可选 |
 
 #### 3. 启用 Actions
@@ -65,39 +100,9 @@
 
 默认每个工作日 **18:00（北京时间）** 自动执行
 
-### 方式二：本地运行
+### 方式二：本地运行 / Docker 部署
 
-```bash
-# 克隆仓库
-git clone https://github.com/ZhuLinsen/daily_stock_analysis.git
-cd daily_stock_analysis
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 配置环境变量
-cp .env.example .env
-vim .env  # 填入你的 API Key
-
-# 运行
-python main.py                    # 完整分析
-python main.py --market-review    # 仅大盘复盘
-python main.py --schedule         # 定时任务模式
-```
-
-### 方式三：Docker 部署
-
-```bash
-# 配置环境变量
-cp .env.example .env
-vim .env
-
-# 一键启动
-docker-compose up -d
-
-# 查看日志
-docker-compose logs -f
-```
+> 📖 本地运行、Docker 部署详细步骤请参考 [完整配置指南](docs/full-guide.md)
 
 ## 📱 推送效果
 
@@ -120,6 +125,9 @@ docker-compose logs -f
 ```
 
 ### 大盘复盘
+
+![大盘复盘推送效果](./sources/dapan_2026-01-13_22-14-52.png)
+
 ```
 🎯 2026-01-10 大盘复盘
 
@@ -138,40 +146,7 @@ docker-compose logs -f
 
 ## ⚙️ 配置说明
 
-### 环境变量
-
-```bash
-# === 必填 ===
-GEMINI_API_KEY=your_gemini_key          # Gemini AI
-WECHAT_WEBHOOK_URL=https://qyapi...     # 企业微信机器人
-STOCK_LIST=600519,300750,002594         # 自选股列表
-
-# === 推荐 ===
-TAVILY_API_KEYS=your_tavily_key         # 新闻搜索
-GEMINI_MODEL=gemini-3-flash-preview     # 主模型
-GEMINI_MODEL_FALLBACK=gemini-2.5-flash  # 备选模型
-
-# === 可选 ===
-TUSHARE_TOKEN=your_token                # Tushare数据源
-SERPAPI_API_KEYS=your_serpapi_key       # 备用搜索
-```
-
-### 定时配置（GitHub Actions）
-
-编辑 `.github/workflows/daily_analysis.yml`:
-
-```yaml
-schedule:
-  # UTC 时间，北京时间 = UTC + 8
-  - cron: '0 10 * * 1-5'   # 周一到周五 18:00（北京时间）
-```
-
-| 北京时间 | UTC cron |
-|---------|----------|
-| 09:30 | `'30 1 * * 1-5'` |
-| 15:00 | `'0 7 * * 1-5'` |
-| 18:00 | `'0 10 * * 1-5'` |
-
+> 📖 完整环境变量、定时任务配置请参考 [完整配置指南](docs/full-guide.md)
 ## 📁 项目结构
 
 ```
@@ -200,42 +175,32 @@ daily_stock_analysis/
 
 ### 🔔 通知渠道扩展
 - [x] 企业微信机器人
-- [ ] 钉钉机器人
-- [ ] 飞书机器人
-- [ ] Telegram Bot
-- [ ] Discord Webhook
-- [ ] Slack Webhook
-- [ ] 邮件通知
-- [ ] iOS/Android 推送（Bark/Pushover）
+- [x] 飞书机器人
+- [x] Telegram Bot
+- [x] 邮件通知（SMTP）
+- [x] 自定义 Webhook（支持钉钉、Discord、Slack、Bark 等）
+- [x] iOS/Android 推送（Pushover）
 
 ### 🤖 AI 模型支持
-- [x] Google Gemini
-- [ ] OpenAI GPT-4
-- [ ] Claude
-- [ ] 通义千问
-- [ ] 文心一言
-- [ ] DeepSeek
-- [ ] 本地模型（Ollama）
+- [x] Google Gemini（主力，免费额度）
+- [x] OpenAI 兼容 API（支持 GPT-4/DeepSeek/通义千问/Claude/文心一言 等）
+- [x] 本地模型（Ollama）
 
 ### 📊 数据源扩展
 - [x] AkShare（免费）
 - [x] Tushare Pro
 - [x] Baostock
 - [x] YFinance
-- [ ] 东方财富 API
-- [ ] 同花顺 API
-- [ ] 新浪财经
 
 ### 🎯 功能增强
 - [x] 决策仪表盘
 - [x] 大盘复盘
 - [x] 定时推送
 - [x] GitHub Actions
+- [x] 港股支持
 - [ ] Web 管理界面
-- [ ] 自选股动态管理 API
 - [ ] 历史分析回测
-- [ ] 多策略支持
-- [ ] 港股/美股支持
+- [ ] 美股支持
 
 ## 🤝 贡献
 
@@ -244,8 +209,24 @@ daily_stock_analysis/
 详见 [贡献指南](CONTRIBUTING.md)
 
 ## 📄 License
-
 [MIT License](LICENSE) © 2026 ZhuLinsen
+
+如果你在项目中使用或基于本项目进行二次开发，
+非常欢迎在 README 或文档中注明来源并附上本仓库链接。
+这将有助于项目的持续维护和社区发展。
+
+## 📬 联系与合作
+- GitHub Issues：[提交 Issue](https://github.com/ZhuLinsen/daily_stock_analysis/issues)
+
+## ⭐ Star History
+
+<a href="https://star-history.com/#ZhuLinsen/daily_stock_analysis&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ZhuLinsen/daily_stock_analysis&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ZhuLinsen/daily_stock_analysis&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ZhuLinsen/daily_stock_analysis&type=Date" />
+ </picture>
+</a>
 
 ## ⚠️ 免责声明
 
@@ -254,3 +235,14 @@ daily_stock_analysis/
 ---
 
 **如果觉得有用，请给个 ⭐ Star 支持一下！**
+
+<!-- 赞赏锚点 -->
+<a id="sponsor"></a>
+###### ☕ 请我喝杯咖啡
+- 如果觉得本项目对你有帮助且行有余力，可以请我喝杯咖啡，支持项目的持续维护与迭代；不赞赏也完全不影响使用。
+- 感谢支持, 祝您股市长虹，拿主力当提款机。
+
+<div align="center">
+  <img src="./sources/wechatpay.jpg" alt="WeChat Pay" width="200" style="margin-right: 20px;">
+  <img src="./sources/alipay.jpg" alt="Alipay" width="200">
+</div>

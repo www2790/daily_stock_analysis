@@ -26,8 +26,8 @@ import os
 # 代理配置 - 仅在本地环境使用，GitHub Actions 不需要
 if os.getenv("GITHUB_ACTIONS") != "true":
     # 本地开发环境，如需代理请取消注释或修改端口
-    os.environ["http_proxy"] = "http://127.0.0.1:10809"
-    os.environ["https_proxy"] = "http://127.0.0.1:10809"
+    # os.environ["http_proxy"] = "http://127.0.0.1:10809"
+    # os.environ["https_proxy"] = "http://127.0.0.1:10809"
     pass
 
 import argparse
@@ -35,17 +35,18 @@ import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+from feishu_doc import FeishuDocManager
 
 from config import get_config, Config
 from storage import get_db, DatabaseManager
 from data_provider import DataFetcherManager
 from data_provider.akshare_fetcher import AkshareFetcher, RealtimeQuote, ChipDistribution
 from analyzer import GeminiAnalyzer, AnalysisResult, STOCK_NAME_MAP
-from notification import NotificationService, send_daily_report
+from notification import NotificationService, NotificationChannel, send_daily_report
 from search_service import SearchService, SearchResponse
 from stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from market_analyzer import MarketAnalyzer
@@ -155,6 +156,7 @@ class StockAnalysisPipeline:
         
         # 初始化搜索服务
         self.search_service = SearchService(
+            bocha_keys=self.config.bocha_api_keys,
             tavily_keys=self.config.tavily_api_keys,
             serpapi_keys=self.config.serpapi_keys,
         )
@@ -423,7 +425,8 @@ class StockAnalysisPipeline:
     def process_single_stock(
         self, 
         code: str,
-        skip_analysis: bool = False
+        skip_analysis: bool = False,
+        single_stock_notify: bool = False
     ) -> Optional[AnalysisResult]:
         """
         处理单只股票的完整流程
@@ -432,12 +435,14 @@ class StockAnalysisPipeline:
         1. 获取数据
         2. 保存数据
         3. AI 分析
+        4. 单股推送（可选，#55）
         
         此方法会被线程池调用，需要处理好异常
         
         Args:
             code: 股票代码
             skip_analysis: 是否跳过 AI 分析
+            single_stock_notify: 是否启用单股推送模式（每分析完一只立即推送）
             
         Returns:
             AnalysisResult 或 None
@@ -464,6 +469,17 @@ class StockAnalysisPipeline:
                     f"[{code}] 分析完成: {result.operation_advice}, "
                     f"评分 {result.sentiment_score}"
                 )
+                
+                # 单股推送模式（#55）：每分析完一只股票立即推送
+                if single_stock_notify and self.notifier.is_available():
+                    try:
+                        single_report = self.notifier.generate_single_stock_report(result)
+                        if self.notifier.send(single_report):
+                            logger.info(f"[{code}] 单股推送成功")
+                        else:
+                            logger.warning(f"[{code}] 单股推送失败")
+                    except Exception as e:
+                        logger.error(f"[{code}] 单股推送异常: {e}")
             
             return result
             
@@ -499,6 +515,7 @@ class StockAnalysisPipeline:
         
         # 使用配置中的股票列表
         if stock_codes is None:
+            self.config.refresh_stock_list()
             stock_codes = self.config.stock_list
         
         if not stock_codes:
@@ -508,6 +525,11 @@ class StockAnalysisPipeline:
         logger.info(f"===== 开始分析 {len(stock_codes)} 只股票 =====")
         logger.info(f"股票列表: {', '.join(stock_codes)}")
         logger.info(f"并发数: {self.max_workers}, 模式: {'仅获取数据' if dry_run else '完整分析'}")
+        
+        # 单股推送模式（#55）：从配置读取
+        single_stock_notify = getattr(self.config, 'single_stock_notify', False)
+        if single_stock_notify:
+            logger.info("已启用单股推送模式：每分析完一只股票立即推送")
         
         results: List[AnalysisResult] = []
         
@@ -519,7 +541,8 @@ class StockAnalysisPipeline:
                 executor.submit(
                     self.process_single_stock, 
                     code, 
-                    skip_analysis=dry_run
+                    skip_analysis=dry_run,
+                    single_stock_notify=single_stock_notify and send_notification
                 ): code
                 for code in stock_codes
             }
@@ -549,13 +572,18 @@ class StockAnalysisPipeline:
         logger.info(f"===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
         
-        # 发送通知
+        # 发送通知（单股推送模式下跳过汇总推送，避免重复）
         if results and send_notification and not dry_run:
-            self._send_notifications(results)
+            if single_stock_notify:
+                # 单股推送模式：只保存汇总报告，不再重复推送
+                logger.info("单股推送模式：跳过汇总推送，仅保存报告到本地")
+                self._send_notifications(results, skip_push=True)
+            else:
+                self._send_notifications(results)
         
         return results
     
-    def _send_notifications(self, results: List[AnalysisResult]) -> None:
+    def _send_notifications(self, results: List[AnalysisResult], skip_push: bool = False) -> None:
         """
         发送分析结果通知
         
@@ -563,6 +591,7 @@ class StockAnalysisPipeline:
         
         Args:
             results: 分析结果列表
+            skip_push: 是否跳过推送（仅保存到本地，用于单股推送模式）
         """
         try:
             logger.info("生成决策仪表盘日报...")
@@ -574,20 +603,45 @@ class StockAnalysisPipeline:
             filepath = self.notifier.save_report_to_file(report)
             logger.info(f"决策仪表盘日报已保存: {filepath}")
             
-            # 推送到企业微信（使用精简版决策仪表盘）
+            # 跳过推送（单股推送模式）
+            if skip_push:
+                return
+            
+            # 推送通知
             if self.notifier.is_available():
-                # 生成精简版决策仪表盘用于微信推送
-                wechat_dashboard = self.notifier.generate_wechat_dashboard(results)
-                logger.info(f"微信决策仪表盘长度: {len(wechat_dashboard)} 字符")
-                logger.debug(f"微信推送内容:\n{wechat_dashboard}")
-                
-                success = self.notifier.send_to_wechat(wechat_dashboard)
+                channels = self.notifier.get_available_channels()
+
+                # 企业微信：只发精简版（平台限制）
+                wechat_success = False
+                if NotificationChannel.WECHAT in channels:
+                    dashboard_content = self.notifier.generate_wechat_dashboard(results)
+                    logger.info(f"企业微信仪表盘长度: {len(dashboard_content)} 字符")
+                    logger.debug(f"企业微信推送内容:\n{dashboard_content}")
+                    wechat_success = self.notifier.send_to_wechat(dashboard_content)
+
+                # 其他渠道：发完整报告（避免自定义 Webhook 被 wechat 截断逻辑污染）
+                non_wechat_success = False
+                for channel in channels:
+                    if channel == NotificationChannel.WECHAT:
+                        continue
+                    if channel == NotificationChannel.FEISHU:
+                        non_wechat_success = self.notifier.send_to_feishu(report) or non_wechat_success
+                    elif channel == NotificationChannel.TELEGRAM:
+                        non_wechat_success = self.notifier.send_to_telegram(report) or non_wechat_success
+                    elif channel == NotificationChannel.EMAIL:
+                        non_wechat_success = self.notifier.send_to_email(report) or non_wechat_success
+                    elif channel == NotificationChannel.CUSTOM:
+                        non_wechat_success = self.notifier.send_to_custom(report) or non_wechat_success
+                    else:
+                        logger.warning(f"未知通知渠道: {channel}")
+
+                success = wechat_success or non_wechat_success
                 if success:
                     logger.info("决策仪表盘推送成功")
                 else:
                     logger.warning("决策仪表盘推送失败")
             else:
-                logger.info("企业微信未配置，跳过推送")
+                logger.info("通知渠道未配置，跳过推送")
                 
         except Exception as e:
             logger.error(f"发送通知失败: {e}")
@@ -605,6 +659,7 @@ def parse_arguments() -> argparse.Namespace:
   python main.py --dry-run          # 仅获取数据，不进行 AI 分析
   python main.py --stocks 600519,000001  # 指定分析特定股票
   python main.py --no-notify        # 不发送推送通知
+  python main.py --single-notify    # 启用单股推送模式（每分析完一只立即推送）
   python main.py --schedule         # 启用定时任务模式
   python main.py --market-review    # 仅运行大盘复盘
         '''
@@ -632,6 +687,12 @@ def parse_arguments() -> argparse.Namespace:
         '--no-notify',
         action='store_true',
         help='不发送推送通知'
+    )
+    
+    parser.add_argument(
+        '--single-notify',
+        action='store_true',
+        help='启用单股推送模式：每分析完一只股票立即推送，而不是汇总推送'
     )
     
     parser.add_argument(
@@ -686,14 +747,21 @@ def run_market_review(notifier: NotificationService, analyzer=None, search_servi
         review_report = market_analyzer.run_daily_review()
         
         if review_report:
-            # 推送到微信
+            # 保存报告到文件
+            date_str = datetime.now().strftime('%Y%m%d')
+            report_filename = f"market_review_{date_str}.md"
+            filepath = notifier.save_report_to_file(
+                f"# 🎯 大盘复盘\n\n{review_report}", 
+                report_filename
+            )
+            logger.info(f"大盘复盘报告已保存: {filepath}")
+            
+            # 推送通知
             if notifier.is_available():
                 # 添加标题
-                wechat_report = f"## 🎯 大盘复盘\n\n{review_report}"
-                if len(wechat_report) > 3800:
-                    wechat_report = wechat_report[:3800] + "\n...(已截断)"
+                report_content = f"🎯 大盘复盘\n\n{review_report}"
                 
-                success = notifier.send_to_wechat(wechat_report)
+                success = notifier.send(report_content)
                 if success:
                     logger.info("大盘复盘推送成功")
                 else:
@@ -718,6 +786,10 @@ def run_full_analysis(
     这是定时任务调用的主函数
     """
     try:
+        # 命令行参数 --single-notify 覆盖配置（#55）
+        if getattr(args, 'single_notify', False):
+            config.single_stock_notify = True
+        
         # 创建调度器
         pipeline = StockAnalysisPipeline(
             config=config,
@@ -732,12 +804,17 @@ def run_full_analysis(
         )
         
         # 2. 运行大盘复盘（如果启用且不是仅个股模式）
+        market_report = ""
         if config.market_review_enabled and not args.no_market_review:
-            run_market_review(
+            # 只调用一次，并获取结果
+            review_result = run_market_review(
                 notifier=pipeline.notifier,
                 analyzer=pipeline.analyzer,
                 search_service=pipeline.search_service
             )
+            # 如果有结果，赋值给 market_report 用于后续飞书文档生成
+            if review_result:
+                market_report = review_result
         
         # 输出摘要
         if results:
@@ -750,6 +827,39 @@ def run_full_analysis(
                 )
         
         logger.info("\n任务执行完成")
+
+        # === 新增：生成飞书云文档 ===
+        try:
+            feishu_doc = FeishuDocManager()
+            if feishu_doc.is_configured() and (results or market_report):
+                logger.info("正在创建飞书云文档...")
+
+                # 1. 准备标题 "01-01 13:01大盘复盘"
+                tz_cn = timezone(timedelta(hours=8))
+                now = datetime.now(tz_cn)
+                doc_title = f"{now.strftime('%Y-%m-%d %H:%M')} 大盘复盘"
+
+                # 2. 准备内容 (拼接个股分析和大盘复盘)
+                full_content = ""
+
+                # 添加大盘复盘内容（如果有）
+                if market_report:
+                    full_content += f"# 📈 大盘复盘\n\n{market_report}\n\n---\n\n"
+
+                # 添加个股决策仪表盘（使用 NotificationService 生成）
+                if results:
+                    dashboard_content = pipeline.notifier.generate_dashboard_report(results)
+                    full_content += f"# 🚀 个股决策仪表盘\n\n{dashboard_content}"
+
+                # 3. 创建文档
+                doc_url = feishu_doc.create_daily_doc(doc_title, full_content)
+                if doc_url:
+                    logger.info(f"飞书云文档创建成功: {doc_url}")
+                    # 可选：将文档链接也推送到群里
+                    pipeline.notifier.send(f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档创建成功: {doc_url}")
+
+        except Exception as e:
+            logger.error(f"飞书文档生成失败: {e}")
         
     except Exception as e:
         logger.exception(f"分析流程执行失败: {e}")
@@ -791,14 +901,15 @@ def main() -> int:
         # 模式1: 仅大盘复盘
         if args.market_review:
             logger.info("模式: 仅大盘复盘")
-            notifier = NotificationService(config.wechat_webhook_url)
+            notifier = NotificationService()
             
             # 初始化搜索服务和分析器（如果有配置）
             search_service = None
             analyzer = None
             
-            if config.tavily_api_keys or config.serpapi_keys:
+            if config.bocha_api_keys or config.tavily_api_keys or config.serpapi_keys:
                 search_service = SearchService(
+                    bocha_keys=config.bocha_api_keys,
                     tavily_keys=config.tavily_api_keys,
                     serpapi_keys=config.serpapi_keys
                 )

@@ -188,6 +188,55 @@ _realtime_cache: Dict[str, Any] = {
     'ttl': 60  # 60秒缓存有效期
 }
 
+# ETF 实时行情缓存
+_etf_realtime_cache: Dict[str, Any] = {
+    'data': None,
+    'timestamp': 0,
+    'ttl': 60  # 60秒缓存有效期
+}
+
+
+def _is_etf_code(stock_code: str) -> bool:
+    """
+    判断代码是否为 ETF 基金
+    
+    ETF 代码规则：
+    - 上交所 ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
+    - 深交所 ETF: 15xxxx, 16xxxx, 18xxxx
+    
+    Args:
+        stock_code: 股票/基金代码
+        
+    Returns:
+        True 表示是 ETF 代码，False 表示是普通股票代码
+    """
+    etf_prefixes = ('51', '52', '56', '58', '15', '16', '18')
+    return stock_code.startswith(etf_prefixes) and len(stock_code) == 6
+
+
+def _is_hk_code(stock_code: str) -> bool:
+    """
+    判断代码是否为港股
+    
+    港股代码规则：
+    - 5位数字代码，如 '00700' (腾讯控股)
+    - 部分港股代码可能带有前缀，如 'hk00700', 'hk1810'
+    
+    Args:
+        stock_code: 股票代码
+        
+    Returns:
+        True 表示是港股代码，False 表示不是港股代码
+    """
+    # 去除可能的 'hk' 前缀并检查是否为纯数字
+    code = stock_code.lower()
+    if code.startswith('hk'):
+        # 带 hk 前缀的一定是港股，去掉前缀后应为纯数字（1-5位）
+        numeric_part = code[2:]
+        return numeric_part.isdigit() and 1 <= len(numeric_part) <= 5
+    # 无前缀时，5位纯数字才视为港股（避免误判 A 股代码）
+    return code.isdigit() and len(code) == 5
+
 
 class AkshareFetcher(BaseFetcher):
     """
@@ -264,13 +313,30 @@ class AkshareFetcher(BaseFetcher):
         """
         从 Akshare 获取原始数据
         
-        使用 ak.stock_zh_a_hist() 获取 A 股历史数据
+        根据代码类型自动选择 API：
+        - 普通股票：使用 ak.stock_zh_a_hist()
+        - ETF 基金：使用 ak.fund_etf_hist_em()
         
         流程：
-        1. 设置随机 User-Agent
-        2. 执行速率限制（随机休眠）
-        3. 调用 akshare API
-        4. 处理返回数据
+        1. 判断代码类型（股票/ETF）
+        2. 设置随机 User-Agent
+        3. 执行速率限制（随机休眠）
+        4. 调用对应的 akshare API
+        5. 处理返回数据
+        """
+        # 根据代码类型选择不同的获取方法
+        if _is_hk_code(stock_code):
+            return self._fetch_hk_data(stock_code, start_date, end_date)
+        elif _is_etf_code(stock_code):
+            return self._fetch_etf_data(stock_code, start_date, end_date)
+        else:
+            return self._fetch_stock_data(stock_code, start_date, end_date)
+    
+    def _fetch_stock_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取普通 A 股历史数据
+        
+        数据来源：ak.stock_zh_a_hist()
         """
         import akshare as ak
         
@@ -321,6 +387,131 @@ class AkshareFetcher(BaseFetcher):
             
             raise DataFetchError(f"Akshare 获取数据失败: {e}") from e
     
+    def _fetch_etf_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取 ETF 基金历史数据
+        
+        数据来源：ak.fund_etf_hist_em()
+        
+        Args:
+            stock_code: ETF 代码，如 '512400', '159883'
+            start_date: 开始日期，格式 'YYYY-MM-DD'
+            end_date: 结束日期，格式 'YYYY-MM-DD'
+            
+        Returns:
+            ETF 历史数据 DataFrame
+        """
+        import akshare as ak
+        
+        # 防封禁策略 1: 随机 User-Agent
+        self._set_random_user_agent()
+        
+        # 防封禁策略 2: 强制休眠
+        self._enforce_rate_limit()
+        
+        logger.info(f"[API调用] ak.fund_etf_hist_em(symbol={stock_code}, period=daily, "
+                   f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, adjust=qfq)")
+        
+        try:
+            import time as _time
+            api_start = _time.time()
+            
+            # 调用 akshare 获取 ETF 日线数据
+            df = ak.fund_etf_hist_em(
+                symbol=stock_code,
+                period="daily",
+                start_date=start_date.replace('-', ''),
+                end_date=end_date.replace('-', ''),
+                adjust="qfq"  # 前复权
+            )
+            
+            api_elapsed = _time.time() - api_start
+            
+            # 记录返回数据摘要
+            if df is not None and not df.empty:
+                logger.info(f"[API返回] ak.fund_etf_hist_em 成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
+                logger.info(f"[API返回] 列名: {list(df.columns)}")
+                logger.info(f"[API返回] 日期范围: {df['日期'].iloc[0]} ~ {df['日期'].iloc[-1]}")
+                logger.debug(f"[API返回] 最新3条数据:\n{df.tail(3).to_string()}")
+            else:
+                logger.warning(f"[API返回] ak.fund_etf_hist_em 返回空数据, 耗时 {api_elapsed:.2f}s")
+            
+            return df
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # 检测反爬封禁
+            if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
+                logger.warning(f"检测到可能被封禁: {e}")
+                raise RateLimitError(f"Akshare 可能被限流: {e}") from e
+            
+            raise DataFetchError(f"Akshare 获取 ETF 数据失败: {e}") from e
+    
+    def _fetch_hk_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取港股历史数据
+        
+        数据来源：ak.stock_hk_hist()
+        
+        Args:
+            stock_code: 港股代码，如 '00700', '01810'
+            start_date: 开始日期，格式 'YYYY-MM-DD'
+            end_date: 结束日期，格式 'YYYY-MM-DD'
+            
+        Returns:
+            港股历史数据 DataFrame
+        """
+        import akshare as ak
+        
+        # 防封禁策略 1: 随机 User-Agent
+        self._set_random_user_agent()
+        
+        # 防封禁策略 2: 强制休眠
+        self._enforce_rate_limit()
+        
+        # 确保代码格式正确（5位数字）
+        code = stock_code.lower().replace('hk', '').zfill(5)
+        
+        logger.info(f"[API调用] ak.stock_hk_hist(symbol={code}, period=daily, "
+                   f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, adjust=qfq)")
+        
+        try:
+            import time as _time
+            api_start = _time.time()
+            
+            # 调用 akshare 获取港股日线数据
+            df = ak.stock_hk_hist(
+                symbol=code,
+                period="daily",
+                start_date=start_date.replace('-', ''),
+                end_date=end_date.replace('-', ''),
+                adjust="qfq"  # 前复权
+            )
+            
+            api_elapsed = _time.time() - api_start
+            
+            # 记录返回数据摘要
+            if df is not None and not df.empty:
+                logger.info(f"[API返回] ak.stock_hk_hist 成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
+                logger.info(f"[API返回] 列名: {list(df.columns)}")
+                logger.info(f"[API返回] 日期范围: {df['日期'].iloc[0]} ~ {df['日期'].iloc[-1]}")
+                logger.debug(f"[API返回] 最新3条数据:\n{df.tail(3).to_string()}")
+            else:
+                logger.warning(f"[API返回] ak.stock_hk_hist 返回空数据, 耗时 {api_elapsed:.2f}s")
+            
+            return df
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # 检测反爬封禁
+            if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
+                logger.warning(f"检测到可能被封禁: {e}")
+                raise RateLimitError(f"Akshare 可能被限流: {e}") from e
+            
+            raise DataFetchError(f"Akshare 获取港股数据失败: {e}") from e
+    
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """
         标准化 Akshare 数据
@@ -362,14 +553,30 @@ class AkshareFetcher(BaseFetcher):
         """
         获取实时行情数据
         
-        数据来源：ak.stock_zh_a_spot_em()
-        包含：量比、换手率、市盈率、市净率、总市值、流通市值等
+        根据代码类型自动选择数据源：
+        - 普通股票：ak.stock_zh_a_spot_em()
+        - ETF 基金：ak.fund_etf_spot_em()
         
         Args:
-            stock_code: 股票代码
+            stock_code: 股票/ETF代码
             
         Returns:
             RealtimeQuote 对象，获取失败返回 None
+        """
+        # 根据代码类型选择不同的获取方法
+        if _is_hk_code(stock_code):
+            return self._get_hk_realtime_quote(stock_code)
+        elif _is_etf_code(stock_code):
+            return self._get_etf_realtime_quote(stock_code)
+        else:
+            return self._get_stock_realtime_quote(stock_code)
+    
+    def _get_stock_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
+        """
+        获取普通 A 股实时行情数据
+        
+        数据来源：ak.stock_zh_a_spot_em()
+        包含：量比、换手率、市盈率、市净率、总市值、流通市值等
         """
         import akshare as ak
         
@@ -379,24 +586,40 @@ class AkshareFetcher(BaseFetcher):
             if (_realtime_cache['data'] is not None and 
                 current_time - _realtime_cache['timestamp'] < _realtime_cache['ttl']):
                 df = _realtime_cache['data']
-                logger.debug(f"[缓存命中] 使用缓存的实时行情数据")
+                logger.debug(f"[缓存命中] 使用缓存的A股实时行情数据")
             else:
-                # 防封禁策略
-                self._set_random_user_agent()
-                self._enforce_rate_limit()
-                
-                logger.info(f"[API调用] ak.stock_zh_a_spot_em() 获取A股实时行情...")
-                import time as _time
-                api_start = _time.time()
-                
-                df = ak.stock_zh_a_spot_em()
-                
-                api_elapsed = _time.time() - api_start
-                logger.info(f"[API返回] ak.stock_zh_a_spot_em 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
-                
-                # 更新缓存
+                last_error: Optional[Exception] = None
+                df = None
+                for attempt in range(1, 3):
+                    try:
+                        # 防封禁策略
+                        self._set_random_user_agent()
+                        self._enforce_rate_limit()
+
+                        logger.info(f"[API调用] ak.stock_zh_a_spot_em() 获取A股实时行情... (attempt {attempt}/2)")
+                        import time as _time
+                        api_start = _time.time()
+
+                        df = ak.stock_zh_a_spot_em()
+
+                        api_elapsed = _time.time() - api_start
+                        logger.info(f"[API返回] ak.stock_zh_a_spot_em 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
+                        break
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(f"[API错误] ak.stock_zh_a_spot_em 获取失败 (attempt {attempt}/2): {e}")
+                        time.sleep(min(2 ** attempt, 5))
+
+                # 更新缓存：成功缓存数据；失败也缓存空数据，避免同一轮任务对同一接口反复请求
+                if df is None:
+                    logger.error(f"[API错误] ak.stock_zh_a_spot_em 最终失败: {last_error}")
+                    df = pd.DataFrame()
                 _realtime_cache['data'] = df
                 _realtime_cache['timestamp'] = current_time
+
+            if df is None or df.empty:
+                logger.warning(f"[实时行情] A股实时行情数据为空，跳过 {stock_code}")
+                return None
             
             # 查找指定股票
             row = df[df['代码'] == stock_code]
@@ -442,12 +665,189 @@ class AkshareFetcher(BaseFetcher):
             logger.error(f"[API错误] 获取 {stock_code} 实时行情失败: {e}")
             return None
     
+    def _get_etf_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
+        """
+        获取 ETF 基金实时行情数据
+        
+        数据来源：ak.fund_etf_spot_em()
+        包含：最新价、涨跌幅、成交量、成交额、换手率等
+        
+        Args:
+            stock_code: ETF 代码
+            
+        Returns:
+            RealtimeQuote 对象，获取失败返回 None
+        """
+        import akshare as ak
+        
+        try:
+            # 检查缓存
+            current_time = time.time()
+            if (_etf_realtime_cache['data'] is not None and 
+                current_time - _etf_realtime_cache['timestamp'] < _etf_realtime_cache['ttl']):
+                df = _etf_realtime_cache['data']
+                logger.debug(f"[缓存命中] 使用缓存的ETF实时行情数据")
+            else:
+                last_error: Optional[Exception] = None
+                df = None
+                for attempt in range(1, 3):
+                    try:
+                        # 防封禁策略
+                        self._set_random_user_agent()
+                        self._enforce_rate_limit()
+
+                        logger.info(f"[API调用] ak.fund_etf_spot_em() 获取ETF实时行情... (attempt {attempt}/2)")
+                        import time as _time
+                        api_start = _time.time()
+
+                        df = ak.fund_etf_spot_em()
+
+                        api_elapsed = _time.time() - api_start
+                        logger.info(f"[API返回] ak.fund_etf_spot_em 成功: 返回 {len(df)} 只ETF, 耗时 {api_elapsed:.2f}s")
+                        break
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(f"[API错误] ak.fund_etf_spot_em 获取失败 (attempt {attempt}/2): {e}")
+                        time.sleep(min(2 ** attempt, 5))
+
+                if df is None:
+                    logger.error(f"[API错误] ak.fund_etf_spot_em 最终失败: {last_error}")
+                    df = pd.DataFrame()
+                _etf_realtime_cache['data'] = df
+                _etf_realtime_cache['timestamp'] = current_time
+
+            if df is None or df.empty:
+                logger.warning(f"[实时行情] ETF实时行情数据为空，跳过 {stock_code}")
+                return None
+            
+            # 查找指定 ETF
+            row = df[df['代码'] == stock_code]
+            if row.empty:
+                logger.warning(f"[API返回] 未找到 ETF {stock_code} 的实时行情")
+                return None
+            
+            row = row.iloc[0]
+            
+            # 安全获取字段值
+            def safe_float(val, default=0.0):
+                try:
+                    if pd.isna(val):
+                        return default
+                    return float(val)
+                except:
+                    return default
+            
+            # ETF 行情数据构建（部分字段 ETF 可能不支持，使用默认值）
+            quote = RealtimeQuote(
+                code=stock_code,
+                name=str(row.get('名称', '')),
+                price=safe_float(row.get('最新价')),
+                change_pct=safe_float(row.get('涨跌幅')),
+                change_amount=safe_float(row.get('涨跌额')),
+                volume_ratio=safe_float(row.get('量比', 0)),  # ETF 可能无量比
+                turnover_rate=safe_float(row.get('换手率')),
+                amplitude=safe_float(row.get('振幅')),
+                pe_ratio=0.0,  # ETF 通常无市盈率
+                pb_ratio=0.0,  # ETF 通常无市净率
+                total_mv=safe_float(row.get('总市值', 0)),
+                circ_mv=safe_float(row.get('流通市值', 0)),
+                change_60d=0.0,  # ETF 接口可能不提供
+                high_52w=safe_float(row.get('52周最高', 0)),
+                low_52w=safe_float(row.get('52周最低', 0)),
+            )
+            
+            logger.info(f"[ETF实时行情] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%, "
+                       f"换手率={quote.turnover_rate}%")
+            return quote
+            
+        except Exception as e:
+            logger.error(f"[API错误] 获取 ETF {stock_code} 实时行情失败: {e}")
+            return None
+    
+    def _get_hk_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
+        """
+        获取港股实时行情数据
+        
+        数据来源：ak.stock_hk_spot_em()
+        包含：最新价、涨跌幅、成交量、成交额等
+        
+        Args:
+            stock_code: 港股代码
+            
+        Returns:
+            RealtimeQuote 对象，获取失败返回 None
+        """
+        import akshare as ak
+        
+        try:
+            # 防封禁策略
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            
+            # 确保代码格式正确（5位数字）
+            code = stock_code.lower().replace('hk', '').zfill(5)
+            
+            logger.info(f"[API调用] ak.stock_hk_spot_em() 获取港股实时行情...")
+            import time as _time
+            api_start = _time.time()
+            
+            df = ak.stock_hk_spot_em()
+            
+            api_elapsed = _time.time() - api_start
+            logger.info(f"[API返回] ak.stock_hk_spot_em 成功: 返回 {len(df)} 只港股, 耗时 {api_elapsed:.2f}s")
+            
+            # 查找指定港股
+            row = df[df['代码'] == code]
+            if row.empty:
+                logger.warning(f"[API返回] 未找到港股 {code} 的实时行情")
+                return None
+            
+            row = row.iloc[0]
+            
+            # 安全获取字段值
+            def safe_float(val, default=0.0):
+                try:
+                    if pd.isna(val):
+                        return default
+                    return float(val)
+                except:
+                    return default
+            
+            # 港股行情数据构建
+            quote = RealtimeQuote(
+                code=stock_code,
+                name=str(row.get('名称', '')),
+                price=safe_float(row.get('最新价')),
+                change_pct=safe_float(row.get('涨跌幅')),
+                change_amount=safe_float(row.get('涨跌额')),
+                volume_ratio=safe_float(row.get('量比', 0)),  # 港股可能无量比
+                turnover_rate=safe_float(row.get('换手率', 0)),
+                amplitude=safe_float(row.get('振幅', 0)),
+                pe_ratio=safe_float(row.get('市盈率', 0)),  # 港股可能有市盈率
+                pb_ratio=safe_float(row.get('市净率', 0)),  # 港股可能有市净率
+                total_mv=safe_float(row.get('总市值', 0)),
+                circ_mv=safe_float(row.get('流通市值', 0)),
+                change_60d=0.0,  # 港股接口可能不提供
+                high_52w=safe_float(row.get('52周最高', 0)),
+                low_52w=safe_float(row.get('52周最低', 0)),
+            )
+            
+            logger.info(f"[港股实时行情] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%, "
+                       f"换手率={quote.turnover_rate}%")
+            return quote
+            
+        except Exception as e:
+            logger.error(f"[API错误] 获取港股 {stock_code} 实时行情失败: {e}")
+            return None
+    
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
         获取筹码分布数据
         
         数据来源：ak.stock_cyq_em()
         包含：获利比例、平均成本、筹码集中度
+        
+        注意：ETF/指数没有筹码分布数据，会直接返回 None
         
         Args:
             stock_code: 股票代码
@@ -456,6 +856,11 @@ class AkshareFetcher(BaseFetcher):
             ChipDistribution 对象（最新一天的数据），获取失败返回 None
         """
         import akshare as ak
+        
+        # ETF/指数没有筹码分布数据
+        if _is_etf_code(stock_code):
+            logger.debug(f"[API跳过] {stock_code} 是 ETF/指数，无筹码分布数据")
+            return None
         
         try:
             # 防封禁策略
@@ -550,9 +955,61 @@ if __name__ == "__main__":
     
     fetcher = AkshareFetcher()
     
+    # 测试普通股票
+    print("=" * 50)
+    print("测试普通股票数据获取")
+    print("=" * 50)
     try:
         df = fetcher.get_daily_data('600519')  # 茅台
-        print(f"获取成功，共 {len(df)} 条数据")
+        print(f"[股票] 获取成功，共 {len(df)} 条数据")
         print(df.tail())
     except Exception as e:
-        print(f"获取失败: {e}")
+        print(f"[股票] 获取失败: {e}")
+    
+    # 测试 ETF 基金
+    print("\n" + "=" * 50)
+    print("测试 ETF 基金数据获取")
+    print("=" * 50)
+    try:
+        df = fetcher.get_daily_data('512400')  # 有色龙头ETF
+        print(f"[ETF] 获取成功，共 {len(df)} 条数据")
+        print(df.tail())
+    except Exception as e:
+        print(f"[ETF] 获取失败: {e}")
+    
+    # 测试 ETF 实时行情
+    print("\n" + "=" * 50)
+    print("测试 ETF 实时行情获取")
+    print("=" * 50)
+    try:
+        quote = fetcher.get_realtime_quote('512880')  # 证券ETF
+        if quote:
+            print(f"[ETF实时] {quote.name}: 价格={quote.price}, 涨跌幅={quote.change_pct}%")
+        else:
+            print("[ETF实时] 未获取到数据")
+    except Exception as e:
+        print(f"[ETF实时] 获取失败: {e}")
+    
+    # 测试港股历史数据
+    print("\n" + "=" * 50)
+    print("测试港股历史数据获取")
+    print("=" * 50)
+    try:
+        df = fetcher.get_daily_data('00700')  # 腾讯控股
+        print(f"[港股] 获取成功，共 {len(df)} 条数据")
+        print(df.tail())
+    except Exception as e:
+        print(f"[港股] 获取失败: {e}")
+    
+    # 测试港股实时行情
+    print("\n" + "=" * 50)
+    print("测试港股实时行情获取")
+    print("=" * 50)
+    try:
+        quote = fetcher.get_realtime_quote('00700')  # 腾讯控股
+        if quote:
+            print(f"[港股实时] {quote.name}: 价格={quote.price}, 涨跌幅={quote.change_pct}%")
+        else:
+            print("[港股实时] 未获取到数据")
+    except Exception as e:
+        print(f"[港股实时] 获取失败: {e}")
